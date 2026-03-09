@@ -1,0 +1,8 @@
+{
+  "name": "日经225 溢价率分析",
+  "description": "这个描述在哪里？",
+  "etf_codes": ["513880","513520","159866","513000"],
+  "threshold": 2.0,
+  "default_days": 90,
+  "benchmark": "日经"
+}

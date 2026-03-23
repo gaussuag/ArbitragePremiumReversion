@@ -487,20 +487,61 @@ class ETFDataFetcher:
         return None
 
     def _get_nav_data(self, etf_code, start_date=None, end_date=None):
-        """获取ETF历史净值数据（带重试）"""
+        """获取ETF历史净值数据（带重试和增量更新）"""
         cache_key = f"nav_{etf_code}"
 
-        # 检查缓存
+        # 标准化日期参数
+        if start_date is None:
+            start_date = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
+        if end_date is None:
+            end_date = datetime.now().strftime("%Y-%m-%d")
+
+        query_start = pd.to_datetime(start_date)
+        query_end = pd.to_datetime(end_date)
+
+        # 加载缓存
         cached = self.cache.load(cache_key)
-        if cached is not None:
-            # 根据日期过滤
-            if start_date:
-                cached = cached[cached["净值日期"] >= pd.to_datetime(start_date)]
-            if end_date:
-                cached = cached[cached["净值日期"] <= pd.to_datetime(end_date)]
-            if len(cached) > 0:
-                print(f"使用缓存数据 ({len(cached)}条)", end=" ")
-                return cached
+
+        # 如果有缓存，确定需要补充的数据范围
+        if cached is not None and len(cached) > 0:
+            cached = cached.copy()
+            cached["净值日期"] = pd.to_datetime(cached["净值日期"])
+            cache_start = cached["净值日期"].min()
+            cache_end = cached["净值日期"].max()
+
+            # 如果查询范围完全在缓存范围内，直接过滤返回
+            if query_start >= cache_start and query_end <= cache_end:
+                filtered = cached[
+                    (cached["净值日期"] >= query_start)
+                    & (cached["净值日期"] <= query_end)
+                ]
+                print(f"使用缓存数据 ({len(filtered)}条)", end=" ")
+                return filtered
+
+            # 需要补充数据（检查是否有缺口）
+            need_fetch = False
+            fetch_start = query_start
+            fetch_end = query_end
+
+            if query_start < cache_start:
+                need_fetch = True
+            if query_end > cache_end:
+                need_fetch = True
+
+            if not need_fetch:
+                # 只需在缓存范围内过滤
+                filtered = cached[
+                    (cached["净值日期"] >= query_start)
+                    & (cached["净值日期"] <= query_end)
+                ]
+                print(f"使用缓存数据 ({len(filtered)}条)", end=" ")
+                return filtered
+
+            # 否则从 AKShare 获取全部数据（净值接口返回"成立来"历史数据）
+            print(
+                f"本地缓存: {cache_start.strftime('%Y-%m-%d')}至{cache_end.strftime('%Y-%m-%d')}, 需补充新数据",
+                end=" ",
+            )
 
         # 从AKShare获取（带重试）
         for attempt in range(3):
@@ -514,9 +555,22 @@ class ETFDataFetcher:
 
                 if df is not None and len(df) > 0:
                     df["净值日期"] = pd.to_datetime(df["净值日期"])
+
+                    # 合并缓存数据
+                    if cached is not None and len(cached) > 0:
+                        df = pd.concat([cached, df], ignore_index=True)
+                        df = df.drop_duplicates(subset=["净值日期"], keep="last")
+                        df = df.sort_values("净值日期").reset_index(drop=True)
+                        print(f"合并完成 ({len(df)}条)", end=" ")
+
                     # 保存缓存
                     self.cache.save(cache_key, df)
-                    return df
+
+                    # 返回查询范围内的数据
+                    result = df[
+                        (df["净值日期"] >= query_start) & (df["净值日期"] <= query_end)
+                    ]
+                    return result
 
             except Exception as e:
                 if attempt < 2:
@@ -524,6 +578,15 @@ class ETFDataFetcher:
                     time.sleep(1)
                 else:
                     print(f"失败: {e}")
+
+        # 请求失败，如果有缓存，返回缓存中查询范围内的数据
+        if cached is not None and len(cached) > 0:
+            filtered = cached[
+                (cached["净值日期"] >= query_start) & (cached["净值日期"] <= query_end)
+            ]
+            if len(filtered) > 0:
+                print(f"使用缓存数据 ({len(filtered)}条)", end=" ")
+                return filtered
 
         return None
 
